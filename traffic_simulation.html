@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>道路交通状况模拟显示</title>
+<style>
+  :root{
+    --green:#2e9e3f;
+    --yellow:#e6b400;
+    --red:#d9352b;
+    --bg:#f5f7fa;
+    --card:#ffffff;
+    --ink:#1f2933;
+    --muted:#6b7280;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;
+    background:var(--bg);color:var(--ink);
+    padding:24px;line-height:1.5;
+  }
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .card{background:var(--card);border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  label{font-size:14px;font-weight:600}
+  input[type=text]{
+    flex:1;min-width:220px;padding:10px 12px;border:1px solid #d1d5db;border-radius:8px;
+    font-size:15px;font-family:inherit;
+  }
+  button{
+    padding:10px 20px;border:none;border-radius:8px;background:#2563eb;color:#fff;
+    font-size:15px;font-weight:600;cursor:pointer;transition:.15s;
+  }
+  button:hover{background:#1d4ed8}
+  button:disabled{background:#9ca3af;cursor:not-allowed}
+  .status{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-top:4px}
+  .status .chip{display:inline-flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+  .dot{width:16px;height:16px;border-radius:50%;background:#cbd5e1;display:inline-block;transition:background .4s}
+  .levelText{font-size:18px;font-weight:700}
+  canvas{width:100%;height:240px;display:block;border-radius:10px;background:#374151}
+  .legend{display:flex;gap:20px;flex-wrap:wrap;margin-top:12px;font-size:13px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:12px;height:12px;border-radius:3px;display:inline-block}
+  .note{font-size:13px;color:var(--muted);margin-top:6px}
+  .threshold{font-size:13px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+  <h1>道路交通状况模拟显示</h1>
+  <div class="sub">输入校门口车流量数据，观察道路拥挤情况对应的颜色变化（绿=畅通 / 黄=缓行 / 红=拥堵）</div>
+
+  <div class="card">
+    <div class="row">
+      <label for="flowInput">车流量数据（逗号分隔）：</label>
+      <input id="flowInput" type="text" value="18,30,60" />
+      <button id="runBtn">运行模拟</button>
+      <button id="stopBtn" style="background:#64748b">停止</button>
+    </div>
+    <div class="threshold">判定规则：车流量 ≤ 20 → 绿色（畅通）；21–50 → 黄色（缓行）；&gt; 50 → 红色（拥堵）</div>
+  </div>
+
+  <div class="card">
+    <div class="status">
+      <div class="chip"><span class="dot" id="statusDot"></span><span class="levelText" id="statusLabel">等待运行</span></div>
+      <div>当前车流量：<b id="currentFlow">—</b> 辆/分钟</div>
+      <div>车速：<b id="speedLabel">—</b></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <canvas id="road" width="900" height="240"></canvas>
+    <div class="legend">
+      <span><i style="background:var(--green)"></i>畅通（车少、车速快）</span>
+      <span><i style="background:var(--yellow)"></i>缓行（车较多、车速中等）</span>
+      <span><i style="background:var(--red)"></i>拥堵（车密集、车速慢/停滞）</span>
+    </div>
+    <div class="note">提示：运行后会依次加载每个数据点，可直观看到道路颜色与车流密度的变化。</div>
+  </div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('road');
+  const ctx = canvas.getContext('2d');
+  const flowInput = document.getElementById('flowInput');
+  const runBtn = document.getElementById('runBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusLabel = document.getElementById('statusLabel');
+  const currentFlow = document.getElementById('currentFlow');
+  const speedLabel = document.getElementById('speedLabel');
+
+  // 拥挤等级判定
+  function levelOf(flow){
+    if(flow <= 20) return {key:'green', name:'畅通', color:'#2e9e3f', speed:2.6, density:0.55};
+    if(flow <= 50) return {key:'yellow', name:'缓行', color:'#e6b400', speed:1.4, density:1.1};
+    return {key:'red', name:'拥堵', color:'#d9352b', speed:0.5, density:1.9};
+  }
+
+  let cars = [];
+  let state = {flow:18, level:levelOf(18)};
+  let running = false;
+  let rafId = null;
+  let seqTimer = null;
+
+  function resize(){
+    const ratio = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = w * ratio; canvas.height = h * ratio;
+    ctx.setTransform(ratio,0,0,ratio,0,0);
+  }
+  window.addEventListener('resize', resize);
+
+  function buildCars(){
+    cars = [];
+    const w = canvas.clientWidth;
+    const n = Math.max(3, Math.round(state.flow * 0.9 * state.level.density));
+    const carColors = ['#f8fafc','#fca5a5','#93c5fd','#fde68a','#a7f3d0','#e9d5ff'];
+    for(let i=0;i<n;i++){
+      cars.push({
+        x: Math.random()*w,
+        y: 60 + (i%3)*55 + Math.random()*12,
+        w: 34, h: 20,
+        v: state.level.speed * (0.8 + Math.random()*0.4),
+        c: carColors[i % carColors.length]
+      });
+    }
+  }
+
+  function draw(){
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    // 路面
+    ctx.fillStyle = '#374151';
+    ctx.fillRect(0,0,w,h);
+    // 车道分隔虚线
+    ctx.strokeStyle = 'rgba(255,255,255,.5)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([18,16]);
+    [h*0.33, h*0.66].forEach(y=>{ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); });
+    ctx.setLineDash([]);
+    // 状态色带（顶部与底部）
+    ctx.fillStyle = state.level.color;
+    ctx.globalAlpha = 0.9;
+    ctx.fillRect(0,0,w,8);
+    ctx.fillRect(0,h-8,w,8);
+    ctx.globalAlpha = 1;
+    // 车辆
+    cars.forEach(car=>{
+      ctx.fillStyle = car.c;
+      ctx.fillRect(car.x, car.y, car.w, car.h);
+      // 车窗
+      ctx.fillStyle = '#1f2937';
+      ctx.fillRect(car.x+6, car.y+4, 10, 12);
+      ctx.fillStyle = car.c;
+      car.x += car.v;
+      if(car.x > w) car.x = -car.w - Math.random()*40;
+    });
+  }
+
+  function loop(){
+    draw();
+    if(running) rafId = requestAnimationFrame(loop);
+  }
+
+  function applyState(flow){
+    state.flow = flow;
+    state.level = levelOf(flow);
+    statusDot.style.background = state.level.color;
+    statusLabel.textContent = state.level.name;
+    statusLabel.style.color = state.level.color;
+    currentFlow.textContent = flow;
+    speedLabel.textContent = state.level.speed >= 2 ? '快' : (state.level.speed >= 1 ? '中' : '慢 / 停滞');
+    buildCars();
+  }
+
+  function startSequence(){
+    const raw = flowInput.value.split(',').map(s=>parseInt(s.trim(),10)).filter(n=>!isNaN(n));
+    if(raw.length === 0){ alert('请输入有效的车流量数据，例如 18,30,60'); return; }
+    running = true;
+    runBtn.disabled = true;
+    let i = 0;
+    applyState(raw[0]);
+    seqTimer = setInterval(()=>{
+      i++;
+      if(i >= raw.length){
+        clearInterval(seqTimer);
+        seqTimer = null;
+        return; // 保持最后一组数据继续动画
+      }
+      applyState(raw[i]);
+    }, 2500);
+    loop();
+  }
+
+  function stop(){
+    running = false;
+    if(seqTimer){ clearInterval(seqTimer); seqTimer = null; }
+    if(rafId) cancelAnimationFrame(rafId);
+    runBtn.disabled = false;
+    statusLabel.textContent = '已停止';
+    statusLabel.style.color = 'var(--muted)';
+  }
+
+  runBtn.addEventListener('click', ()=>{ resize(); startSequence(); });
+  stopBtn.addEventListener('click', stop);
+  resize();
+  applyState(18);
+  loop();
+})();
+</script>
+</body>
+</html>
